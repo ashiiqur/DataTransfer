@@ -38,6 +38,7 @@ a.dl{display:inline-block;margin-top:6px;padding:10px 14px;border-radius:10px;ba
 <main>
 <h1><svg class="logo" viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2h8l-1 5H9z"/><path d="M9 7h6v13a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2z"/><path d="M12 11v3"/></svg>LightLink</h1>
 <p class="sub">Send a file by blinking light. Receive it with the camera. No internet, no cable.</p>
+<div id="permBox" class="card" style="margin-bottom:12px"><button class="go" id="permB" style="width:100%">Allow camera access</button><p class="mut" id="permM" style="margin:8px 0 0">Camera permission is needed to receive (and to use the flashlight when sending).</p></div>
 <div class="tabs"><button id="tS" class="on">Send</button><button id="tR">Receive</button></div>
 
 <section id="send">
@@ -105,15 +106,18 @@ $('#slot').onchange=()=>$('#file').onchange();
 let tx=null;
 async function startTx(){
   const f=$('#file').files[0];if(!f){$('#txm').textContent='Choose a file first.';return}
-  const T=+$('#slot').value,screen=$('#screen').checked,pk=await build(f);
+  const T=+$('#slot').value,screen=$('#screen').checked;
   let st=null,track=null;
   if(!screen){
     try{
-      st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+      $('#txm').textContent='Asking for camera…';
+      st=await getCamStream({video:{facingMode:{ideal:'environment'}},audio:false});
       track=st.getVideoTracks()[0];
       if(!(track.getCapabilities&&track.getCapabilities().torch)){st.getTracks().forEach(t=>t.stop());$('#txm').textContent='This browser can’t control the flashlight (Chrome on Android can). Tick “Use screen flash” instead.';return}
-    }catch(e){$('#txm').textContent='Camera permission is needed to switch the flashlight: '+e.message;return}
+    }catch(e){$('#txm').textContent=camErrMsg(e);refreshPerm();return}
+    refreshPerm();
   }
+  const pk=await build(f);
   tx={st,track,run:true,last:-1,screen};keepAwake();
   const ov=$('#ov');if(screen){ov.style.display='block';ov.onclick=stopTx}
   $('#txB').textContent='Stop';$('#txB').className='stop';
@@ -176,18 +180,46 @@ function decode(runs,T,b){
   if(crc16(body)!==(by[7+len]<<8|by[8+len]))return'checksum';
   accept(body);return'ok';
 }
+// ---- camera permission helpers
+function camErrMsg(e){
+  const n=e&&e.name;
+  if(n==='InsecureContext')return 'The browser blocks the camera on this page because it isn’t served securely. Open it from https:// or http://localhost (not a plain http:// IP address).';
+  if(n==='NotAllowedError'||n==='SecurityError')return 'Camera is blocked. Tap the camera/lock icon in the address bar, set Camera to “Allow”, then reload. '+(window.self!==window.top?'This page is inside a frame – open it in its own tab. ':'');
+  if(n==='NotFoundError'||n==='OverconstrainedError')return 'No camera was found on this device.';
+  if(n==='NotReadableError'||n==='AbortError')return 'The camera is in use by another app or tab. Close it and try again.';
+  return 'Camera error: '+((e&&e.message)||n||'unknown');
+}
+async function getCamStream(constraints){
+  const md=navigator.mediaDevices;
+  if(!window.isSecureContext||!md||!md.getUserMedia){const e=new Error('insecure');e.name='InsecureContext';throw e}
+  return md.getUserMedia(constraints);
+}
+async function refreshPerm(){
+  let state='prompt';
+  try{if(navigator.permissions)state=(await navigator.permissions.query({name:'camera'})).state}catch(e){}
+  const box=$('#permBox');
+  if(state==='granted'){box.style.display='none';return}
+  box.style.display='block';
+  $('#permM').textContent=state==='denied'?camErrMsg({name:'NotAllowedError'}):'Camera permission is needed to receive (and to use the flashlight when sending).';
+}
+$('#permB').onclick=async()=>{
+  try{const st=await getCamStream({video:true,audio:false});st.getTracks().forEach(t=>t.stop());$('#permBox').style.display='none'}
+  catch(e){$('#permM').textContent=camErrMsg(e)}
+  refreshPerm();
+};
+try{if(navigator.permissions)navigator.permissions.query({name:'camera'}).then(p=>{p.onchange=refreshPerm}).catch(()=>{})}catch(e){}
+refreshPerm();
 async function openCam(){
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Camera API is unavailable here. Open this page from http://localhost or an https link, in Chrome or Edge.');
-  const m=$('#cam').value,md=navigator.mediaDevices;
-  if(m==='any')return md.getUserMedia({video:true,audio:false});
-  try{return await md.getUserMedia({video:{facingMode:{ideal:m},width:{ideal:640},height:{ideal:480}},audio:false})}
-  catch(e){if(e.name==='NotAllowedError')throw e;return md.getUserMedia({video:true,audio:false})}
+  const m=$('#cam').value;
+  if(m==='any')return getCamStream({video:true,audio:false});
+  try{return await getCamStream({video:{facingMode:{ideal:m},width:{ideal:640},height:{ideal:480}},audio:false})}
+  catch(e){if(e.name==='NotAllowedError'||e.name==='InsecureContext'||e.name==='SecurityError')throw e;return getCamStream({video:true,audio:false})}
 }
 async function startRx(){
   let st;
   try{$('#rxs').textContent='Asking for camera…';st=await openCam()}
-  catch(e){$('#rxs').textContent='Camera access failed ('+(e.name||'error')+'): '+e.message;return}
-  const v=$('#vid');v.srcObject=st;try{await v.play()}catch(e){}keepAwake();
+  catch(e){$('#rxs').textContent=camErrMsg(e);refreshPerm();return}
+  const v=$('#vid');v.srcObject=st;try{await v.play()}catch(e){}keepAwake();refreshPerm();
   rx={st,run:true};S=null;stats={ok:0,bad:0,why:''};$('#pb').style.width='0';$('#res').innerHTML='';
   $('#rxB').textContent='Stop';$('#rxB').className='stop';
   const cv=document.createElement('canvas');cv.width=32;cv.height=24;
@@ -234,5 +266,5 @@ function stopRx(){
   $('#rxB').textContent='Start receiving';$('#rxB').className='go';
 }
 $('#rxB').onclick=()=>rx?stopRx():startRx();
-if(!navigator.mediaDevices)$('#rxs').textContent='This page can’t use the camera here. Open it from http://localhost or an https link in Chrome or Edge.';
+if(!window.isSecureContext||!navigator.mediaDevices)$('#rxs').textContent=camErrMsg({name:'InsecureContext'});
 </script></body></html>
