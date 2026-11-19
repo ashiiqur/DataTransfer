@@ -32,7 +32,7 @@ canvas{width:100%;height:48px;display:block;border-radius:8px;background:var(--b
 #ov{position:fixed;inset:0;z-index:99;display:none;background:#000}
 #dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--acc);opacity:.2;margin-right:6px}
 pre{white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto;background:var(--bg);padding:8px;border-radius:8px;font-size:12px}
-a.dl{display:inline-block;margin-top:6px;padding:10px 14px;border-radius:10px;background:var(--ok);color:#fff;text-decoration:none;font-weight:600}
+a.dl{display:block;text-align:center;margin-top:10px;padding:14px;font-size:16px;border-radius:10px;background:var(--ok);color:#fff;text-decoration:none;font-weight:600}
 </style></head>
 <body><div id="ov"></div>
 <main>
@@ -43,11 +43,15 @@ a.dl{display:inline-block;margin-top:6px;padding:10px 14px;border-radius:10px;ba
 
 <section id="send">
  <div class="card">
-  <input type="file" id="file">
+  <div class="tabs" style="margin-bottom:8px"><button id="mF" class="on">📁 File</button><button id="mT">💬 Text / emoji</button></div>
+  <div id="fileBox"><input type="file" id="file"></div>
+  <div id="textBox" hidden><textarea id="txt" rows="4" maxlength="2000" placeholder="Type any text, emojis 😀🔥, any language…" style="width:100%;font:inherit;font-size:16px;padding:10px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--fg);resize:vertical"></textarea></div>
   <div class="row"><label>Speed (slot length)
    <select id="slot"><option value="60">60 ms – fastest</option><option value="80">80 ms</option><option value="100" selected>100 ms</option><option value="150">150 ms</option><option value="250">250 ms – safest</option></select></label></div>
   <label class="row"><input type="checkbox" id="screen"> Use screen flash instead of flashlight (for iPhone, laptops, testing)</label>
-  <p class="mut" id="est">Pick a file to see the estimated time.</p>
+  <p class="mut" id="est">Pick a file to see its name, size and estimated time.</p>
+  <div class="bar"><i id="txpb"></i></div>
+  <p class="mut" id="txinfo" style="margin-top:0">Progress appears here while sending.</p>
   <button class="go" id="txB" style="width:100%">Start sending</button>
   <p id="txs" class="mut"><span id="dot"></span><span id="txm">Idle.</span></p>
  </div>
@@ -60,7 +64,9 @@ a.dl{display:inline-block;margin-top:6px;padding:10px 14px;border-radius:10px;ba
   <button class="go" id="rxB" style="flex:1">Start receiving</button></div>
   <div class="cam"><video id="vid" playsinline muted></video><div class="roi"></div></div>
   <canvas id="scope" width="300" height="60"></canvas>
+  <div id="fname" style="font-weight:600;word-break:break-all">Waiting for the sender’s header (file name &amp; size)…</div>
   <div class="bar"><i id="pb"></i></div>
+  <div class="row" style="justify-content:space-between;margin:0 0 6px"><span id="rxpct" style="font-weight:600">0%</span><span id="rxtime" class="mut">⏱ 0:00</span></div>
   <p class="mut" id="rxs">Idle.</p>
   <div id="res"></div>
  </div>
@@ -73,16 +79,19 @@ const crc16=a=>{let c=0xFFFF;for(const b of a){c^=b<<8;for(let i=0;i<8;i++)c=c&0
 async function pipe(u8,S){const s=new S('deflate-raw'),w=s.writable.getWriter();w.write(u8);w.close();return new Uint8Array(await new Response(s.readable).arrayBuffer())}
 let wake=null;const keepAwake=async()=>{try{wake=await navigator.wakeLock.request('screen')}catch(e){}};
 
+const fmtB=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(2)+' MB';
+const fmtT=ms=>{const s=Math.max(0,Math.round(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),r=String(s%60).padStart(2,'0');return h?`${h}:${String(m).padStart(2,'0')}:${r}`:`${m}:${r}`};
+
 // ---- tabs
 function tab(t){$('#send').hidden=t!=='s';$('#recv').hidden=t!=='r';$('#tS').className=t==='s'?'on':'';$('#tR').className=t==='r'?'on':'';stopTx();stopRx()}
 $('#tS').onclick=()=>tab('s');$('#tR').onclick=()=>tab('r');
 
 // ---- build packets
 const gap=5;
-async function build(file){
+async function build(file,isText){
   let data=new Uint8Array(await file.arrayBuffer()),z=0;
   if(window.CompressionStream){try{const c=await pipe(data,CompressionStream);if(c.length<data.length){data=c;z=1}}catch(e){}}
-  const meta=new TextEncoder().encode(JSON.stringify({n:file.name.slice(-40),z}));
+  const meta=new TextEncoder().encode(JSON.stringify({n:file.name.slice(-40),z,s:file.size,t:isText?1:0}));
   const all=new Uint8Array(1+meta.length+data.length);all[0]=meta.length;all.set(meta,1);all.set(data,1+meta.length);
   const tot=Math.ceil(all.length/CH),id=Math.random()*256|0,pk=[];
   for(let i=0;i<tot;i++){
@@ -95,17 +104,33 @@ async function build(file){
   }
   return pk;
 }
-$('#file').onchange=async()=>{
-  const f=$('#file').files[0];if(!f)return;
-  const pk=await build(f),T=+$('#slot').value,sec=pk.reduce((a,p)=>a+p.length,0)*T/1000;
-  $('#est').textContent=`${pk.length} packets · about ${sec<90?Math.round(sec)+' s':(sec/60).toFixed(1)+' min'} per full pass.`+(sec>600?' That’s long – try a smaller file.':'');
-};
-$('#slot').onchange=()=>$('#file').onchange();
+let mode='f';
+function getSrc(){
+  if(mode==='t'){
+    const t=$('#txt').value;if(!t)return null;
+    const f=new File([t],'message.txt',{type:'text/plain'});
+    return{file:f,text:true,label:`Text message · ${[...t].length} characters · ${fmtB(f.size)}`};
+  }
+  const f=$('#file').files[0];if(!f)return null;
+  return{file:f,text:false,label:`${f.name} · ${fmtB(f.size)}`};
+}
+async function est(){
+  const src=getSrc();if(!src){$('#est').textContent=mode==='t'?'Type a message to see the estimated time.':'Pick a file to see its name, size and estimated time.';return}
+  const pk=await build(src.file,src.text),T=+$('#slot').value,sec=pk.reduce((a,p)=>a+p.length,0)*T/1000;
+  $('#est').textContent=`${src.label} · ${pk.length} packets · about ${sec<90?Math.round(sec)+' s':(sec/60).toFixed(1)+' min'} per full pass.`+(sec>600?' That’s long – try less.':'');
+}
+$('#file').onchange=est;$('#txt').oninput=est;$('#slot').onchange=est;
+function setMode(m){
+  if(tx)stopTx();
+  mode=m;$('#fileBox').hidden=m!=='f';$('#textBox').hidden=m!=='t';
+  $('#mF').className=m==='f'?'on':'';$('#mT').className=m==='t'?'on':'';est();
+}
+$('#mF').onclick=()=>setMode('f');$('#mT').onclick=()=>setMode('t');
 
 // ---- transmit
 let tx=null;
 async function startTx(){
-  const f=$('#file').files[0];if(!f){$('#txm').textContent='Choose a file first.';return}
+  const src=getSrc();if(!src){$('#txm').textContent=mode==='t'?'Type a message first.':'Choose a file first.';return}
   const T=+$('#slot').value,screen=$('#screen').checked;
   let st=null,track=null;
   if(!screen){
@@ -117,7 +142,7 @@ async function startTx(){
     }catch(e){$('#txm').textContent=camErrMsg(e);refreshPerm();return}
     refreshPerm();
   }
-  const pk=await build(f);
+  const pk=await build(src.file,src.text);
   tx={st,track,run:true,last:-1,screen};keepAwake();
   const ov=$('#ov');if(screen){ov.style.display='block';ov.onclick=stopTx}
   $('#txB').textContent='Stop';$('#txB').className='stop';
@@ -126,6 +151,11 @@ async function startTx(){
     else track.applyConstraints({advanced:[{torch:!!on}]}).catch(()=>{});
     $('#dot').style.opacity=on?1:.2};
   let pi=0,k=0,n=0,cyc=0;const t0=performance.now(),me=tx;
+  const cum=[0];for(const p of pk)cum.push(cum[cum.length-1]+p.length);const tt=cum[cum.length-1];
+  const upd=()=>{const d=cum[pi]+k,pc=Math.floor(d/tt*100);
+    $('#txpb').style.width=(d/tt*100)+'%';
+    $('#txinfo').textContent=`${src.label} — ${pc}% of pass ${cyc+1} · packet ${pi+1}/${pk.length} · ⏱ ${fmtT(performance.now()-t0)} elapsed · ~${fmtT((tt-d)*T)} left in this pass`};
+  me.iv=setInterval(upd,500);upd();
   $('#txm').textContent=`Sending packet 1/${pk.length} · pass 1`;
   const tick=()=>{
     if(tx!==me||!me.run)return;
@@ -136,7 +166,7 @@ async function startTx(){
   tick();
 }
 function stopTx(){
-  if(!tx)return;tx.run=false;
+  if(!tx)return;tx.run=false;clearInterval(tx.iv);
   try{if(tx.track)tx.track.applyConstraints({advanced:[{torch:false}]}).catch(()=>{})}catch(e){}
   if(tx.st)tx.st.getTracks().forEach(t=>t.stop());
   $('#ov').style.display='none';tx=null;try{wake&&wake.release()}catch(e){}
@@ -146,13 +176,28 @@ $('#txB').onclick=()=>tx?stopTx():startTx();
 
 // ---- receive
 let rx=null,S=null,stats={ok:0,bad:0,why:''};
+function updRx(){
+  if(!S){$('#fname').textContent='Waiting for the sender’s header (file name & size)…';$('#pb').style.width='0';$('#rxpct').textContent='0%';$('#rxtime').textContent='⏱ 0:00';return}
+  const pct=S.n/S.tot*100,el=(S.end||performance.now())-S.t0;
+  $('#fname').textContent=S.meta?(S.meta.t?`💬 Text message · ${fmtB(S.meta.s||0)}`:`${S.meta.n} · ${fmtB(S.meta.s||0)}`):'Receiving… reading file name & size';
+  $('#pb').style.width=pct+'%';
+  $('#rxpct').textContent=`${S.done?100:Math.floor(pct)}% · ${S.n}/${S.tot} packets`;
+  $('#rxtime').textContent=S.done?`✔ Completed in ${fmtT(el)}`:'⏱ '+fmtT(el)+(S.n>=2?` · ~${fmtT(el/S.n*(S.tot-S.n))} left`:'');
+}
+function tryMeta(){
+  if(S.meta)return;
+  let a=[];for(let i=0;i<S.tot&&S.parts[i];i++){a.push(...S.parts[i]);if(a.length>=1&&a.length>=1+a[0])break}
+  if(!a.length||a.length<1+a[0])return;
+  try{S.meta=JSON.parse(new TextDecoder().decode(Uint8Array.from(a.slice(1,1+a[0]))))}catch(e){}
+}
 function accept(body){
   const id=body[0],seq=body[1]<<8|body[2],tot=body[3]<<8|body[4];
-  if(!S||S.id!==id||S.tot!==tot){S={id,tot,parts:new Array(tot),n:0,done:false};$('#res').innerHTML=''}
+  if(!S||S.id!==id||S.tot!==tot){S={id,tot,parts:new Array(tot),n:0,done:false,meta:null,t0:performance.now(),end:0};$('#res').innerHTML=''}
   if(seq>=tot||S.parts[seq])return;
   S.parts[seq]=Uint8Array.from(body.slice(6));S.n++;
-  $('#pb').style.width=(S.n/tot*100)+'%';
-  if(S.n===tot&&!S.done){S.done=true;complete()}
+  tryMeta();
+  if(S.n===tot&&!S.done){S.done=true;S.end=performance.now();complete()}
+  updRx();
 }
 async function complete(){
   try{
@@ -160,10 +205,19 @@ async function complete(){
     const ml=a[0],meta=JSON.parse(new TextDecoder().decode(a.subarray(1,1+ml)));
     let data=a.subarray(1+ml);if(meta.z)data=await pipe(data,DecompressionStream);
     const url=URL.createObjectURL(new Blob([data])),r=$('#res');r.innerHTML='';
-    const h=document.createElement('div');h.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="var(--ok)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M5 12l5 5 9-10"/></svg>';h.append(`Received ${meta.n} (${data.length} bytes)`);r.append(h);
-    const dl=document.createElement('a');dl.className='dl';dl.href=url;dl.download=meta.n;dl.textContent='Save file';r.append(dl);
-    if(data.length<3000){try{const t=new TextDecoder('utf-8',{fatal:true}).decode(data),pre=document.createElement('pre');pre.textContent=t;r.append(pre)}catch(e){}}
+    const h=document.createElement('div');h.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="var(--ok)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M5 12l5 5 9-10"/></svg>';h.append(`Received ${meta.t?'text message':meta.n} (${fmtB(data.length)}) in ${fmtT(S.end-S.t0)}`);r.append(h);
+    const dl=document.createElement('a');dl.className='dl';dl.href=url;dl.download=meta.n;dl.textContent=meta.t?'⬇ Save as message.txt':'⬇ Save file – '+meta.n;if(meta.t)dl.style.background='var(--mut)';
+    let shown=false;
+    if(meta.t||data.length<3000){try{const t=new TextDecoder('utf-8',{fatal:true}).decode(data),pre=document.createElement('pre');pre.textContent=t;
+      if(meta.t){pre.style.cssText='max-height:320px;font-size:17px;line-height:1.5;padding:12px';
+        const cp=document.createElement('button');cp.className='go';cp.style.cssText='width:100%;margin-top:10px;padding:14px;font-size:16px';cp.textContent='📋 Copy text';
+        cp.onclick=async()=>{try{await navigator.clipboard.writeText(t);cp.textContent='✔ Copied'}catch(e){const r2=document.createRange();r2.selectNodeContents(pre);const sl=getSelection();sl.removeAllRanges();sl.addRange(r2);cp.textContent='Selected – press Copy'}};
+        r.append(pre);r.append(cp);shown=true}
+      else r.append(pre)}catch(e){}}
+    r.append(dl);
     navigator.vibrate&&navigator.vibrate(300);
+    r.scrollIntoView({behavior:'smooth',block:'center'});
+    if(rx){stopRx();$('#rxs').textContent='Transfer complete – camera turned off. Tap “Save file” below.'}
   }catch(e){$('#res').textContent='File arrived but could not be unpacked: '+e.message}
 }
 function decode(runs,T,b){
@@ -220,7 +274,7 @@ async function startRx(){
   try{$('#rxs').textContent='Asking for camera…';st=await openCam()}
   catch(e){$('#rxs').textContent=camErrMsg(e);refreshPerm();return}
   const v=$('#vid');v.srcObject=st;try{await v.play()}catch(e){}keepAwake();refreshPerm();
-  rx={st,run:true};S=null;stats={ok:0,bad:0,why:''};$('#pb').style.width='0';$('#res').innerHTML='';
+  rx={st,run:true,iv:setInterval(updRx,500)};S=null;stats={ok:0,bad:0,why:''};$('#res').innerHTML='';updRx();
   $('#rxB').textContent='Stop';$('#rxB').className='stop';
   const cv=document.createElement('canvas');cv.width=32;cv.height=24;
   const cx=cv.getContext('2d',{willReadFrequently:true}),sc=$('#scope').getContext('2d');
@@ -261,7 +315,7 @@ async function startRx(){
   v.requestVideoFrameCallback?v.requestVideoFrameCallback(frame):requestAnimationFrame(frame);
 }
 function stopRx(){
-  if(!rx)return;rx.run=false;rx.st.getTracks().forEach(t=>t.stop());rx=null;
+  if(!rx)return;rx.run=false;clearInterval(rx.iv);rx.st.getTracks().forEach(t=>t.stop());rx=null;
   try{wake&&wake.release()}catch(e){}
   $('#rxB').textContent='Start receiving';$('#rxB').className='go';
 }
